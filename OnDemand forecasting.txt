@@ -1,0 +1,1746 @@
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from collections import deque
+import random
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+import re
+import json
+from typing import Dict, List, Tuple, Any, Optional
+from dataclasses import dataclass
+import openai  # For LLM-based event summarization
+
+# 1. ENHANCED RECIPE AND INVENTORY DATABASE
+@dataclass
+class InventoryItem:
+    ingredient: str
+    quantity: float
+    unit: str
+    cost_per_unit: float
+    purchase_date: datetime
+    expiry_date: datetime
+    supplier: str
+    batch_id: str
+    
+    @property
+    def days_to_expiry(self) -> int:
+        return (self.expiry_date - datetime.now()).days
+    
+    @property
+    def is_expired(self) -> bool:
+        return datetime.now() > self.expiry_date
+    
+    @property
+    def total_value(self) -> float:
+        return self.quantity * self.cost_per_unit
+
+class EnhancedRecipeDatabase:
+    def __init__(self):
+        self.recipes = {}
+        self.ingredients_master = {}
+        self.current_inventory = {}  # ingredient -> List[InventoryItem]
+        self.waste_history = deque(maxlen=100)
+        self.load_recipes()
+        
+    def load_recipes(self):
+        """Load predefined recipes with enhanced metadata"""
+        self.recipes = {
+            'curd_rice': {
+                'ingredients': {
+                    'rice': {'quantity': 1, 'unit': 'kg', 'cost_per_unit': 80},
+                    'curd': {'quantity': 2, 'unit': 'kg', 'cost_per_unit': 60},
+                    'salt': {'quantity': 0.05, 'unit': 'kg', 'cost_per_unit': 20},
+                    'green_chillies': {'quantity': 0.1, 'unit': 'kg', 'cost_per_unit': 100},
+                    'ginger': {'quantity': 0.05, 'unit': 'kg', 'cost_per_unit': 200}
+                },
+                'serves': 10,
+                'category': 'veg_main',
+                'cuisine': 'south_indian',
+                'preparation_time': 30,
+                'shelf_life': 4,
+                'tags': ['#veg_only', '#cooling', '#light', '#kids_friendly'],
+                'weather_preference': {'hot': 1.3, 'rainy': 0.8, 'cold': 0.9},
+                'spice_level': 1,
+                'nutrition_score': 7
+            },
+            
+            'chicken_biryani': {
+                'ingredients': {
+                    'basmati_rice': {'quantity': 1, 'unit': 'kg', 'cost_per_unit': 150},
+                    'chicken': {'quantity': 1, 'unit': 'kg', 'cost_per_unit': 250},
+                    'onions': {'quantity': 0.5, 'unit': 'kg', 'cost_per_unit': 40},
+                    'yogurt': {'quantity': 0.5, 'unit': 'kg', 'cost_per_unit': 60},
+                    'biryani_masala': {'quantity': 0.1, 'unit': 'kg', 'cost_per_unit': 500},
+                    'ghee': {'quantity': 0.2, 'unit': 'kg', 'cost_per_unit': 400}
+                },
+                'serves': 8,
+                'category': 'non_veg_main',
+                'cuisine': 'mughlai',
+                'preparation_time': 90,
+                'shelf_life': 8,
+                'tags': ['#nonveg_heavy', '#spicy', '#festive', '#premium'],
+                'weather_preference': {'hot': 0.7, 'rainy': 1.2, 'cold': 1.4},
+                'spice_level': 4,
+                'nutrition_score': 8
+            },
+            
+            'paneer_butter_masala': {
+                'ingredients': {
+                    'paneer': {'quantity': 0.5, 'unit': 'kg', 'cost_per_unit': 300},
+                    'onions': {'quantity': 0.4, 'unit': 'kg', 'cost_per_unit': 40},
+                    'tomatoes': {'quantity': 0.5, 'unit': 'kg', 'cost_per_unit': 50},
+                    'cream': {'quantity': 0.2, 'unit': 'liter', 'cost_per_unit': 200},
+                    'butter': {'quantity': 0.1, 'unit': 'kg', 'cost_per_unit': 500}
+                },
+                'serves': 8,
+                'category': 'veg_main',
+                'cuisine': 'north_indian',
+                'preparation_time': 40,
+                'shelf_life': 5,
+                'tags': ['#veg_only', '#rich', '#kids_friendly', '#mild'],
+                'weather_preference': {'hot': 0.8, 'rainy': 1.1, 'cold': 1.3},
+                'spice_level': 2,
+                'nutrition_score': 6
+            },
+            
+            'masala_chai': {
+                'ingredients': {
+                    'tea_leaves': {'quantity': 0.05, 'unit': 'kg', 'cost_per_unit': 400},
+                    'milk': {'quantity': 2, 'unit': 'liter', 'cost_per_unit': 55},
+                    'sugar': {'quantity': 0.3, 'unit': 'kg', 'cost_per_unit': 45},
+                    'ginger': {'quantity': 0.05, 'unit': 'kg', 'cost_per_unit': 200}
+                },
+                'serves': 10,
+                'category': 'beverage',
+                'cuisine': 'basic',
+                'preparation_time': 15,
+                'shelf_life': 2,
+                'tags': ['#hot_beverage', '#energizing', '#warming'],
+                'weather_preference': {'hot': 0.6, 'rainy': 1.5, 'cold': 1.8},
+                'spice_level': 1,
+                'nutrition_score': 4
+            },
+            
+            'cold_coffee': {
+                'ingredients': {
+                    'coffee_powder': {'quantity': 0.1, 'unit': 'kg', 'cost_per_unit': 800},
+                    'milk': {'quantity': 1.5, 'unit': 'liter', 'cost_per_unit': 55},
+                    'sugar': {'quantity': 0.2, 'unit': 'kg', 'cost_per_unit': 45},
+                    'ice_cream': {'quantity': 0.5, 'unit': 'liter', 'cost_per_unit': 300}
+                },
+                'serves': 8,
+                'category': 'beverage',
+                'cuisine': 'western',
+                'preparation_time': 10,
+                'shelf_life': 1,
+                'tags': ['#cold_beverage', '#refreshing', '#sweet'],
+                'weather_preference': {'hot': 1.8, 'rainy': 0.5, 'cold': 0.3},
+                'spice_level': 0,
+                'nutrition_score': 5
+            }
+        }
+        
+        self.extract_ingredients_master()
+    
+    def extract_ingredients_master(self):
+        """Extract ingredient master data with expiry information"""
+        for recipe_name, recipe_data in self.recipes.items():
+            for ingredient, details in recipe_data['ingredients'].items():
+                if ingredient not in self.ingredients_master:
+                    self.ingredients_master[ingredient] = {
+                        'cost_per_unit': details['cost_per_unit'],
+                        'unit': details['unit'],
+                        'shelf_life_days': self._get_ingredient_shelf_life(ingredient),
+                        'category': self._get_ingredient_category(ingredient),
+                        'storage_condition': self._get_storage_condition(ingredient)
+                    }
+    
+    def _get_ingredient_shelf_life(self, ingredient: str) -> int:
+        """Get shelf life for ingredients in days"""
+        shelf_life_map = {
+            'rice': 365, 'basmati_rice': 365, 'wheat_flour': 180,
+            'milk': 3, 'curd': 5, 'yogurt': 5, 'cream': 7,
+            'chicken': 2, 'paneer': 3, 'ice_cream': 90,
+            'onions': 30, 'tomatoes': 7, 'garlic': 30, 'ginger': 15,
+            'green_chillies': 7, 'oil': 365, 'ghee': 180, 'butter': 30,
+            'sugar': 730, 'salt': 1095, 'tea_leaves': 730, 'coffee_powder': 365
+        }
+        
+        # Spices and masalas
+        if any(spice in ingredient.lower() for spice in ['masala', 'powder', 'seeds']):
+            return 365
+        
+        return shelf_life_map.get(ingredient, 30)
+    
+    def _get_ingredient_category(self, ingredient: str) -> str:
+        """Categorize ingredients"""
+        categories = {
+            'grains': ['rice', 'wheat_flour', 'basmati_rice'],
+            'dairy': ['milk', 'curd', 'yogurt', 'cream', 'butter', 'paneer', 'ghee', 'ice_cream'],
+            'vegetables': ['onions', 'tomatoes', 'green_chillies', 'ginger', 'garlic'],
+            'meat': ['chicken', 'mutton', 'fish'],
+            'spices': ['salt', 'turmeric', 'garam_masala', 'biryani_masala'],
+            'beverages': ['tea_leaves', 'coffee_powder'],
+            'others': ['oil', 'sugar']
+        }
+        
+        for category, items in categories.items():
+            if ingredient in items:
+                return category
+        return 'others'
+    
+    def _get_storage_condition(self, ingredient: str) -> str:
+        """Get storage requirements"""
+        cold_storage = ['milk', 'curd', 'yogurt', 'cream', 'butter', 'paneer', 'chicken', 'ice_cream']
+        dry_storage = ['rice', 'wheat_flour', 'sugar', 'salt', 'spices']
+        cool_dry = ['onions', 'garlic', 'ginger', 'oil']
+        
+        if ingredient in cold_storage:
+            return 'refrigerated'
+        elif ingredient in dry_storage:
+            return 'dry'
+        else:
+            return 'cool_dry'
+    
+    def add_inventory(self, ingredient: str, quantity: float, supplier: str, 
+                     batch_id: str = None) -> str:
+        """Add ingredient to inventory with expiry tracking"""
+        if ingredient not in self.ingredients_master:
+            raise ValueError(f"Unknown ingredient: {ingredient}")
+        
+        master_data = self.ingredients_master[ingredient]
+        purchase_date = datetime.now()
+        expiry_date = purchase_date + timedelta(days=master_data['shelf_life_days'])
+        
+        batch_id = batch_id or f"{ingredient}_{purchase_date.strftime('%Y%m%d')}_{random.randint(1000, 9999)}"
+        
+        inventory_item = InventoryItem(
+            ingredient=ingredient,
+            quantity=quantity,
+            unit=master_data['unit'],
+            cost_per_unit=master_data['cost_per_unit'],
+            purchase_date=purchase_date,
+            expiry_date=expiry_date,
+            supplier=supplier,
+            batch_id=batch_id
+        )
+        
+        if ingredient not in self.current_inventory:
+            self.current_inventory[ingredient] = []
+        
+        self.current_inventory[ingredient].append(inventory_item)
+        return batch_id
+    
+    def get_available_quantity(self, ingredient: str, exclude_expired: bool = True) -> float:
+        """Get total available quantity of an ingredient"""
+        if ingredient not in self.current_inventory:
+            return 0.0
+        
+        total = 0.0
+        for item in self.current_inventory[ingredient]:
+            if exclude_expired and item.is_expired:
+                continue
+            total += item.quantity
+        
+        return total
+    
+    def get_expiring_soon(self, days: int = 3) -> List[InventoryItem]:
+        """Get ingredients expiring within specified days"""
+        expiring = []
+        for ingredient, items in self.current_inventory.items():
+            for item in items:
+                if 0 <= item.days_to_expiry <= days and not item.is_expired:
+                    expiring.append(item)
+        
+        return sorted(expiring, key=lambda x: x.days_to_expiry)
+    
+    def consume_ingredient(self, ingredient: str, quantity: float) -> Dict:
+        """Consume ingredient using FIFO method and track waste"""
+        if ingredient not in self.current_inventory:
+            return {'consumed': 0, 'shortage': quantity, 'waste': 0}
+        
+        items = sorted(self.current_inventory[ingredient], 
+                      key=lambda x: x.expiry_date)
+        
+        consumed = 0
+        waste = 0
+        remaining_need = quantity
+        
+        for item in items[:]:
+            if remaining_need <= 0:
+                break
+                
+            if item.is_expired:
+                # Track expired waste
+                waste += item.quantity
+                self.waste_history.append({
+                    'ingredient': ingredient,
+                    'quantity': item.quantity,
+                    'reason': 'expired',
+                    'date': datetime.now(),
+                    'cost': item.total_value
+                })
+                self.current_inventory[ingredient].remove(item)
+                continue
+            
+            if item.quantity <= remaining_need:
+                # Use entire item
+                consumed += item.quantity
+                remaining_need -= item.quantity
+                self.current_inventory[ingredient].remove(item)
+            else:
+                # Use partial item
+                item.quantity -= remaining_need
+                consumed += remaining_need
+                remaining_need = 0
+        
+        shortage = remaining_need
+        return {'consumed': consumed, 'shortage': shortage, 'waste': waste}
+
+# 2. WEATHER DATA INTEGRATION
+class WeatherService:
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key
+        
+    def get_weather_forecast(self, location: str, days: int = 7) -> List[Dict]:
+        """Get weather forecast for location"""
+        # Simulated weather data for demo
+        weather_types = ['sunny', 'rainy', 'cloudy', 'hot', 'cold']
+        forecast = []
+        
+        for i in range(days):
+            date = datetime.now() + timedelta(days=i)
+            weather = {
+                'date': date,
+                'condition': random.choice(weather_types),
+                'temperature': random.randint(15, 35),
+                'humidity': random.randint(40, 90),
+                'precipitation': random.random() * 10 if random.random() > 0.7 else 0
+            }
+            forecast.append(weather)
+        
+        return forecast
+    
+    def classify_weather(self, weather: Dict) -> str:
+        """Classify weather into categories that affect food preferences"""
+        temp = weather['temperature']
+        condition = weather['condition']
+        precipitation = weather.get('precipitation', 0)
+        
+        if precipitation > 5 or condition == 'rainy':
+            return 'rainy'
+        elif temp > 30 or condition == 'hot':
+            return 'hot'
+        elif temp < 20 or condition == 'cold':
+            return 'cold'
+        else:
+            return 'pleasant'
+
+# 3. ENHANCED EVENT SCRAPER WITH LLM INTEGRATION
+class EnhancedEventScraper:
+    def __init__(self, openai_api_key: str = None):
+        self.openai_api_key = openai_api_key
+        self.event_sources = [
+            "https://www.eventbrite.com/d/",
+            "https://allevents.in/",
+            "https://www.bookmyshow.com/"
+        ]
+        
+    def scrape_events(self, location: str, days_ahead: int = 7) -> List[Dict]:
+        """Enhanced event scraping with better data"""
+        # Simulated comprehensive event data
+        sample_events = [
+            {
+                'title': 'Eid-ul-Fitr Grand Celebration at Marina Beach',
+                'date': datetime.now() + timedelta(days=2),
+                'venue': 'Marina Beach Convention Center',
+                'description': 'Grand Eid celebration with traditional iftar, live music, and cultural programs. Family-friendly event with halal food stalls.',
+                'organizer': 'Chennai Muslim Association',
+                'ticket_price': 500,
+                'capacity': 2000,
+                'registration_count': 1500
+            },
+            {
+                'title': 'Jain Community Mahavir Jayanti Celebration',
+                'date': datetime.now() + timedelta(days=1),
+                'venue': 'Jain Temple Complex',
+                'description': 'Religious celebration with prayers, pure vegetarian feast (no onion, no garlic), and spiritual discourse.',
+                'organizer': 'Jain Sangh Chennai',
+                'ticket_price': 0,
+                'capacity': 800,
+                'registration_count': 600
+            },
+            {
+                'title': 'Tech Startup Conference 2025 - AI Revolution',
+                'date': datetime.now() + timedelta(days=3),
+                'venue': 'Hyatt Regency Chennai',
+                'description': 'Two-day technology conference featuring AI, ML, and blockchain sessions. Continental breakfast, networking lunch, and evening cocktails.',
+                'organizer': 'TechHub Chennai',
+                'ticket_price': 2500,
+                'capacity': 1200,
+                'registration_count': 900
+            },
+            {
+                'title': 'IPL Watch Party - CSK vs MI',
+                'date': datetime.now() + timedelta(days=4),
+                'venue': 'Sports Bar & Grill',
+                'description': 'Live cricket match screening with snacks, beverages, and fan activities.',
+                'organizer': 'Sports Entertainment Ltd',
+                'ticket_price': 300,
+                'capacity': 500,
+                'registration_count': 400
+            }
+        ]
+        
+        # Add crowd estimation and event tags
+        for event in sample_events:
+            event.update(self.enhance_event_data(event))
+            
+        return sample_events
+    
+    def enhance_event_data(self, event: Dict) -> Dict:
+        """Enhance event data with AI analysis and crowd estimation"""
+        title = event['title'].lower()
+        description = event['description'].lower()
+        venue = event.get('venue', '').lower()
+        
+        # Dynamic crowd estimation
+        crowd_estimate = self.estimate_crowd_size(event)
+        
+        # Event classification with custom tags
+        event_tags, event_type = self.classify_event_with_tags(title, description, venue)
+        
+        # LLM-based event summary (simulated)
+        llm_summary = self.llm_summarize_event(event) if self.openai_api_key else {}
+        
+        return {
+            'estimated_crowd': crowd_estimate,
+            'event_type': event_type,
+            'custom_tags': event_tags,
+            'llm_analysis': llm_summary,
+            'relevance_score': self.calculate_relevance_score(event_tags, crowd_estimate)
+        }
+    
+    def estimate_crowd_size(self, event: Dict) -> int:
+        """Dynamic crowd estimation based on multiple factors"""
+        base_crowd = event.get('registration_count', 0)
+        capacity = event.get('capacity', 100)
+        ticket_price = event.get('ticket_price', 0)
+        
+        # Adjust based on event characteristics
+        multiplier = 1.0
+        
+        title_lower = event['title'].lower()
+        
+        # Event type multipliers
+        if any(word in title_lower for word in ['festival', 'celebration', 'grand']):
+            multiplier *= 1.3
+        if any(word in title_lower for word in ['wedding', 'marriage']):
+            multiplier *= 1.2
+        if any(word in title_lower for word in ['conference', 'seminar']):
+            multiplier *= 0.9
+        if 'free' in event['description'].lower() or ticket_price == 0:
+            multiplier *= 1.2
+            
+        # Venue-based estimation
+        venue = event.get('venue', '').lower()
+        if any(word in venue for word in ['beach', 'park', 'outdoor']):
+            multiplier *= 1.4
+        elif any(word in venue for word in ['hotel', 'convention', 'hall']):
+            multiplier *= 1.1
+            
+        estimated = int(min(base_crowd * multiplier, capacity))
+        return max(estimated, 50)  # Minimum 50 people
+    
+    def classify_event_with_tags(self, title: str, description: str, venue: str) -> Tuple[List[str], str]:
+        """Classify event and assign custom tags"""
+        text = f"{title} {description} {venue}"
+        tags = []
+        event_type = 'general'
+        
+        # Religious/Cultural tags
+        if any(word in text for word in ['eid', 'muslim', 'islamic', 'iftar', 'halal']):
+            tags.extend(['#nonveg_heavy', '#halal_required', '#festive'])
+            event_type = 'muslim'
+        elif any(word in text for word in ['jain', 'mahavir']):
+            tags.extend(['#veg_only', '#no_onion_garlic', '#pure_veg'])
+            event_type = 'jain'
+        elif any(word in text for word in ['hindu', 'temple', 'diwali', 'holi']):
+            tags.extend(['#veg_preferred', '#traditional', '#sweets_heavy'])
+            event_type = 'hindu'
+        elif any(word in text for word in ['christian', 'church', 'christmas']):
+            tags.extend(['#mixed_diet', '#cake_desserts'])
+            event_type = 'christian'
+            
+        # Event nature tags
+        if any(word in text for word in ['kids', 'children', 'family']):
+            tags.append('#kids_friendly')
+        if any(word in text for word in ['spicy', 'hot', 'chili']):
+            tags.append('#spicy')
+        elif any(word in text for word in ['mild', 'light']):
+            tags.append('#mild')
+            
+        # Corporate/Professional
+        if any(word in text for word in ['conference', 'seminar', 'corporate', 'business']):
+            tags.extend(['#light_meals', '#tea_coffee_heavy', '#professional'])
+            event_type = 'corporate'
+            
+        # Sports/Entertainment
+        if any(word in text for word in ['cricket', 'football', 'match', 'sports']):
+            tags.extend(['#snacks_heavy', '#beverages_high', '#quick_bites'])
+            event_type = 'sports'
+            
+        # Wedding/Celebration
+        if any(word in text for word in ['wedding', 'marriage', 'reception']):
+            tags.extend(['#elaborate_menu', '#desserts_heavy', '#premium'])
+            event_type = 'wedding'
+            
+        return tags, event_type
+    
+    def llm_summarize_event(self, event: Dict) -> Dict:
+        """Use LLM to analyze and summarize event (simulated for demo)"""
+        # This would use actual OpenAI API in production
+        return {
+            'sentiment': 'positive',
+            'food_preference_confidence': 0.85,
+            'crowd_size_confidence': 0.75,
+            'special_requirements': ['halal_certification'] if 'muslim' in event['title'].lower() else [],
+            'recommended_dishes': self._get_recommended_dishes_for_event(event)
+        }
+    
+    def _get_recommended_dishes_for_event(self, event: Dict) -> List[str]:
+        """Get recommended dishes based on event analysis"""
+        title = event['title'].lower()
+        
+        if 'eid' in title or 'muslim' in title:
+            return ['chicken_biryani', 'masala_chai', 'gulab_jamun']
+        elif 'jain' in title:
+            return ['curd_rice', 'paneer_butter_masala', 'plain_rice']
+        elif 'tech' in title or 'conference' in title:
+            return ['masala_chai', 'cold_coffee', 'light_snacks']
+        elif 'cricket' in title or 'sports' in title:
+            return ['cold_coffee', 'snacks', 'quick_bites']
+        else:
+            return ['mixed_selection']
+    
+    def calculate_relevance_score(self, tags: List[str], crowd_size: int) -> float:
+        """Calculate how relevant this event is for food planning"""
+        base_score = min(crowd_size / 1000, 1.0)  # Normalize by crowd size
+        
+        # Boost score based on tags
+        food_relevant_tags = ['#veg_only', '#nonveg_heavy', '#kids_friendly', '#spicy']
+        relevance_boost = len([tag for tag in tags if tag in food_relevant_tags]) * 0.1
+        
+        return min(base_score + relevance_boost, 1.0)
+
+# 4. ENHANCED DEMAND PREDICTOR WITH ALL FEATURES
+class SmartDemandPredictor:
+    def __init__(self, recipe_db: EnhancedRecipeDatabase, weather_service: WeatherService):
+        self.recipe_db = recipe_db
+        self.weather_service = weather_service
+        
+    def predict_dish_demand(self, events: List[Dict], date: datetime, 
+                           base_capacity: int, location: str) -> Dict[str, int]:
+        """Comprehensive demand prediction with all factors"""
+        
+        # Get weather forecast
+        weather_forecast = self.weather_service.get_weather_forecast(location, 1)
+        weather_condition = self.weather_service.classify_weather(weather_forecast[0])
+        
+        # Base demand considering day of week and weather
+        base_demand = self._get_base_demand_with_weather(date, base_capacity, weather_condition)
+        
+        # Apply event impacts
+        total_event_impact = {}
+        for event in events:
+            if event['date'].date() == date.date():
+                event_impact = self._calculate_comprehensive_event_impact(event, base_capacity)
+                
+                for dish, impact in event_impact.items():
+                    total_event_impact[dish] = total_event_impact.get(dish, 0) + impact
+        
+        # Combine base demand with event impacts
+        final_demand = {}
+        all_dishes = set(list(base_demand.keys()) + list(total_event_impact.keys()))
+        
+        for dish in all_dishes:
+            base = base_demand.get(dish, 0)
+            event_boost = total_event_impact.get(dish, 0)
+            final_demand[dish] = max(0, base + event_boost)
+        
+        return final_demand
+    
+    def _get_base_demand_with_weather(self, date: datetime, capacity: int, weather: str) -> Dict[str, int]:
+        """Get base demand adjusted for weather conditions"""
+        # Day of week multipliers
+        weekday_multiplier = {
+            0: 0.7, 1: 0.8, 2: 0.8, 3: 0.9, 4: 1.0, 5: 1.2, 6: 1.1
+        }
+        
+        day_multiplier = weekday_multiplier[date.weekday()]
+        
+        # Base demand percentages
+        base_demand = {
+            'curd_rice': int(capacity * 0.3 * day_multiplier),
+            'chicken_biryani': int(capacity * 0.2 * day_multiplier),
+            'paneer_butter_masala': int(capacity * 0.25 * day_multiplier),
+            'masala_chai': int(capacity * 0.6 * day_multiplier),
+            'cold_coffee': int(capacity * 0.2 * day_multiplier)
+        }
+        
+        # Apply weather adjustments
+        for dish_name in base_demand:
+            if dish_name in self.recipe_db.recipes:
+                weather_pref = self.recipe_db.recipes[dish_name]['weather_preference']
+                weather_multiplier = weather_pref.get(weather, 1.0)
+                base_demand[dish_name] = int(base_demand[dish_name] * weather_multiplier)
+        
+        return base_demand
+    
+    def _calculate_comprehensive_event_impact(self, event: Dict, capacity: int) -> Dict[str, int]:
+        """Calculate event impact considering all factors"""
+        impact = {}
+        
+        # Base crowd impact
+        estimated_crowd = min(event['estimated_crowd'], capacity)
+        event_type = event['event_type']
+        custom_tags = event['custom_tags']
+        relevance_score = event['relevance_score']
+        
+        # Event type specific impacts
+        if event_type == 'muslim':
+            impact.update({
+                'chicken_biryani': int(estimated_crowd * 0.7 * relevance_score),
+                'masala_chai': int(estimated_crowd * 0.5 * relevance_score)
+            })
+        elif event_type == 'jain':
+            impact.update({
+                'curd_rice': int(estimated_crowd * 0.8 * relevance_score),
+                'paneer_butter_masala': int(estimated_crowd * 0.6 * relevance_score)
+            })
+        elif event_type == 'corporate':
+            impact.update({
+                'masala_chai': int(estimated_crowd * 0.9 * relevance_score),
+                'cold_coffee': int(estimated_crowd * 0.7 * relevance_score)
+            })
+        elif event_type == 'sports':
+            impact.update({
+                'cold_coffee': int(estimated_crowd * 0.8 * relevance_score),
+                'masala_chai': int(estimated_crowd * 0.3 * relevance_score)
+            })
+        
+        # Custom tag adjustments
+        if '#kids_friendly' in custom_tags:
+            impact['paneer_butter_masala'] = impact.get('paneer_butter_masala', 0) + int(estimated_crowd * 0.3)
+        
+        if '#spicy' in custom_tags:
+            impact['chicken_biryani'] = impact.get('chicken_biryani', 0) + int(estimated_crowd * 0.2)
+        
+        return impact
+
+# 5. REINFORCEMENT LEARNING ENVIRONMENT WITH WASTE FEEDBACK
+class WasteAwareInventoryEnvironment:
+    def __init__(self, recipe_db: EnhancedRecipeDatabase, hotel_capacity: int = 100):
+        self.recipe_db = recipe_db
+        self.hotel_capacity = hotel_capacity
+        self.ingredients = list(recipe_db.ingredients_master.keys())
+        
+        # Performance tracking
+        self.waste_history = deque(maxlen=100)
+        self.shortage_history = deque(maxlen=100)
+        self.cost_history = deque(maxlen=100)
+        self.accuracy_history = deque(maxlen=100)
+        
+        # Cost parameters
+        self.waste_cost_multiplier = 0.8
+        self.shortage_penalty = 150
+        self.storage_cost_multiplier = 0.05
+        self.expiry_waste_penalty = 200  # Additional penalty for expired items
+        
+    def reset(self):
+        """Reset environment for new episode"""
+        # Clear current inventory for fresh start
+        self.recipe_db.current_inventory = {ingredient: [] for ingredient in self.ingredients}
+        return self.get_state()
+    
+    def get_state(self) -> np.ndarray:
+        """Enhanced state representation with inventory, weather, and expiry info"""
+        state = []
+        
+        # Current inventory levels (normalized)
+        for ingredient in self.ingredients:
+            current_stock = self.recipe_db.get_available_quantity(ingredient)
+            normalized_stock = min(current_stock / 20.0, 1.0)  # Normalize by typical max stock
+            state.append(normalized_stock)
+        
+        # Expiry urgency scores
+        for ingredient in self.ingredients:
+            expiring_items = [item for item in self.recipe_db.current_inventory.get(ingredient, []) 
+                            if 0 <= item.days_to_expiry <= 3]
+            expiry_urgency = sum(item.quantity for item in expiring_items) / 20.0
+            state.append(min(expiry_urgency, 1.0))
+        
+        # Temporal features
+        now = datetime.now()
+        state.extend([
+            now.weekday() / 6.0,
+            now.hour / 23.0,
+            (now.day - 1) / 30.0  # Day of month
+        ])
+        
+        # Historical performance metrics
+        recent_waste_rate = np.mean([w['waste_percentage'] for w in list(self.waste_history)[-10:]]) if self.waste_history else 0
+        recent_shortage_rate = np.mean([s['shortage_rate'] for s in list(self.shortage_history)[-10:]]) if self.shortage_history else 0
+        
+        state.extend([
+            min(recent_waste_rate, 1.0),
+            min(recent_shortage_rate, 1.0)
+        ])
+        
+        return np.array(state, dtype=np.float32)
+    
+    def step(self, action: np.ndarray, predicted_demand: Dict[str, int], 
+             actual_demand: Dict[str, int], weather_condition: str) -> Tuple[np.ndarray, float, bool, Dict]:
+        """Execute inventory action with comprehensive feedback"""
+        
+        # Convert action to ingredient purchase decisions
+        ingredient_orders = {}
+        for i, ingredient in enumerate(self.ingredients):
+            max_order = self._get_max_order_quantity(ingredient)
+            ingredient_orders[ingredient] = action[i] * max_order
+        
+        # Add ordered ingredients to inventory
+        for ingredient, quantity in ingredient_orders.items():
+            if quantity > 0:
+                self.recipe_db.add_inventory(ingredient, quantity, "supplier_demo")
+        
+        # Calculate required ingredients for actual demand
+        actual_required = self.recipe_db.get_ingredients_for_recipes(actual_demand)
+        
+        # Simulate consumption and track waste/shortage
+        consumption_results = {}
+        for ingredient, required in actual_required.items():
+            result = self.recipe_db.consume_ingredient(ingredient, required)
+            consumption_results[ingredient] = result
+        
+        # Calculate comprehensive costs and metrics
+        metrics = self._calculate_comprehensive_metrics(
+            ingredient_orders, consumption_results, predicted_demand, 
+            actual_demand, weather_condition
+        )
+        
+        # Calculate reward
+        reward = self._calculate_reward(metrics)
+        
+        # Update history
+        self._update_performance_history(metrics)
+        
+        next_state = self.get_state()
+        
+        return next_state, reward, False, metrics
+    
+    def _get_max_order_quantity(self, ingredient: str) -> float:
+        """Get reasonable maximum order quantity for ingredient"""
+        category = self.recipe_db.ingredients_master[ingredient]['category']
+        
+        max_quantities = {
+            'grains': 50,      # kg
+            'dairy': 30,       # kg/liter
+            'vegetables': 25,   # kg
+            'meat': 20,        # kg
+            'spices': 5,       # kg
+            'beverages': 10,   # kg
+            'others': 15       # kg/liter
+        }
+        
+        return max_quantities.get(category, 15)
+    
+    def _calculate_comprehensive_metrics(self, orders: Dict, consumption: Dict, 
+                                       predicted: Dict, actual: Dict, weather: str) -> Dict:
+        """Calculate comprehensive performance metrics"""
+        
+        # Basic costs
+        total_purchase_cost = sum(
+            orders.get(ing, 0) * self.recipe_db.ingredients_master[ing]['cost_per_unit']
+            for ing in self.ingredients
+        )
+        
+        total_waste_cost = sum(
+            result['waste'] * self.recipe_db.ingredients_master[ing]['cost_per_unit'] * self.waste_cost_multiplier
+            for ing, result in consumption.items()
+        )
+        
+        total_shortage_cost = sum(
+            result['shortage'] * self.shortage_penalty
+            for result in consumption.values()
+        )
+        
+        # Expiry-based waste
+        expiry_waste_cost = 0
+        for ingredient in self.ingredients:
+            expired_items = [item for item in self.recipe_db.current_inventory.get(ingredient, [])
+                           if item.is_expired]
+            for item in expired_items:
+                expiry_waste_cost += item.total_value * self.expiry_waste_penalty / 100
+        
+        # Storage costs
+        storage_cost = sum(
+            self.recipe_db.get_available_quantity(ing) * 
+            self.recipe_db.ingredients_master[ing]['cost_per_unit'] * self.storage_cost_multiplier
+            for ing in self.ingredients
+        )
+        
+        # Prediction accuracy
+        prediction_accuracy = self._calculate_prediction_accuracy(predicted, actual)
+        
+        # Weather adaptation score
+        weather_adaptation = self._calculate_weather_adaptation_score(actual, weather)
+        
+        # Waste percentage
+        total_ordered = sum(orders.values())
+        total_wasted = sum(result['waste'] for result in consumption.values())
+        waste_percentage = (total_wasted / total_ordered) if total_ordered > 0 else 0
+        
+        # Service level (% of demand met)
+        total_demand = sum(actual.values())
+        total_shortage = sum(result['shortage'] for result in consumption.values())
+        service_level = 1 - (total_shortage / total_demand) if total_demand > 0 else 1
+        
+        return {
+            'total_purchase_cost': total_purchase_cost,
+            'waste_cost': total_waste_cost,
+            'shortage_cost': total_shortage_cost,
+            'expiry_waste_cost': expiry_waste_cost,
+            'storage_cost': storage_cost,
+            'total_cost': total_purchase_cost + total_waste_cost + total_shortage_cost + expiry_waste_cost + storage_cost,
+            'prediction_accuracy': prediction_accuracy,
+            'weather_adaptation': weather_adaptation,
+            'waste_percentage': waste_percentage,
+            'service_level': service_level,
+            'dishes_served': sum(actual.values()) - sum(result['shortage'] for result in consumption.values())
+        }
+    
+    def _calculate_prediction_accuracy(self, predicted: Dict, actual: Dict) -> float:
+        """Calculate prediction accuracy with weighted importance"""
+        if not predicted or not actual:
+            return 0.0
+        
+        total_error = 0
+        total_actual = 0
+        
+        all_dishes = set(list(predicted.keys()) + list(actual.keys()))
+        
+        for dish in all_dishes:
+            pred = predicted.get(dish, 0)
+            act = actual.get(dish, 0)
+            
+            error = abs(pred - act)
+            total_error += error
+            total_actual += act
+        
+        if total_actual == 0:
+            return 1.0
+        
+        accuracy = max(0, 1 - (total_error / total_actual))
+        return accuracy
+    
+    def _calculate_weather_adaptation_score(self, actual_demand: Dict, weather: str) -> float:
+        """Calculate how well the system adapted to weather conditions"""
+        score = 0.0
+        total_dishes = len(actual_demand)
+        
+        for dish, demand in actual_demand.items():
+            if dish in self.recipe_db.recipes:
+                recipe = self.recipe_db.recipes[dish]
+                weather_pref = recipe['weather_preference'].get(weather, 1.0)
+                
+                # Higher score if high-preference dishes had high demand
+                if weather_pref > 1.0 and demand > 0:
+                    score += weather_pref
+                elif weather_pref < 1.0 and demand == 0:
+                    score += 1.0
+        
+        return score / total_dishes if total_dishes > 0 else 0.0
+    
+    def _calculate_reward(self, metrics: Dict) -> float:
+        """Calculate comprehensive reward signal"""
+        
+        # Base reward (negative total cost, scaled)
+        base_reward = -metrics['total_cost'] / 1000.0
+        
+        # Accuracy bonus
+        accuracy_bonus = metrics['prediction_accuracy'] * 20
+        
+        # Service level bonus
+        service_bonus = metrics['service_level'] * 15
+        
+        # Weather adaptation bonus
+        weather_bonus = metrics['weather_adaptation'] * 10
+        
+        # Waste penalty (additional to cost)
+        waste_penalty = -metrics['waste_percentage'] * 30
+        
+        # Expiry management bonus
+        expiry_bonus = -metrics['expiry_waste_cost'] / 100.0
+        
+        total_reward = (base_reward + accuracy_bonus + service_bonus + 
+                       weather_bonus + waste_penalty + expiry_bonus)
+        
+        return total_reward
+    
+    def _update_performance_history(self, metrics: Dict):
+        """Update performance tracking history"""
+        self.waste_history.append({
+            'date': datetime.now(),
+            'waste_percentage': metrics['waste_percentage'],
+            'waste_cost': metrics['waste_cost']
+        })
+        
+        self.shortage_history.append({
+            'date': datetime.now(),
+            'shortage_rate': 1 - metrics['service_level'],
+            'shortage_cost': metrics['shortage_cost']
+        })
+        
+        self.cost_history.append({
+            'date': datetime.now(),
+            'total_cost': metrics['total_cost']
+        })
+        
+        self.accuracy_history.append({
+            'date': datetime.now(),
+            'accuracy': metrics['prediction_accuracy']
+        })
+    
+    def get_performance_summary(self) -> Dict:
+        """Get comprehensive performance summary"""
+        if not self.waste_history:
+            return {'status': 'No data available'}
+        
+        recent_waste = np.mean([w['waste_percentage'] for w in list(self.waste_history)[-10:]])
+        recent_shortage = np.mean([s['shortage_rate'] for s in list(self.shortage_history)[-10:]])
+        recent_cost = np.mean([c['total_cost'] for c in list(self.cost_history)[-10:]])
+        recent_accuracy = np.mean([a['accuracy'] for a in list(self.accuracy_history)[-10:]])
+        
+        return {
+            'avg_waste_percentage': recent_waste,
+            'avg_shortage_rate': recent_shortage,
+            'avg_daily_cost': recent_cost,
+            'avg_prediction_accuracy': recent_accuracy,
+            'service_level': 1 - recent_shortage,
+            'total_episodes': len(self.waste_history)
+        }
+
+# 6. ENHANCED DRL AGENT WITH MULTI-OBJECTIVE LEARNING
+class EnhancedDQNAgent:
+    def __init__(self, state_size: int, action_size: int, lr: float = 0.001):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.memory = deque(maxlen=20000)
+        self.epsilon = 1.0
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.learning_rate = lr
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Multi-objective learning parameters
+        self.cost_weight = 0.4
+        self.waste_weight = 0.3
+        self.service_weight = 0.3
+        
+        # Neural networks
+        self.q_network = self._build_enhanced_network().to(self.device)
+        self.target_network = self._build_enhanced_network().to(self.device)
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
+        
+        # Experience replay with prioritization
+        self.priority_memory = deque(maxlen=5000)
+        
+        self.update_target_network()
+    
+    def _build_enhanced_network(self):
+        """Build enhanced neural network with attention mechanism"""
+        class AttentionDQN(nn.Module):
+            def __init__(self, state_size, action_size):
+                super(AttentionDQN, self).__init__()
+                self.state_size = state_size
+                self.action_size = action_size
+                
+                # Feature extraction layers
+                self.feature_extractor = nn.Sequential(
+                    nn.Linear(state_size, 256),
+                    nn.ReLU(),
+                    nn.BatchNorm1d(256),
+                    nn.Dropout(0.3)
+                )
+                
+                # Attention mechanism for ingredient relationships
+                self.attention = nn.MultiheadAttention(embed_dim=256, num_heads=8)
+                
+                # Decision layers
+                self.decision_layers = nn.Sequential(
+                    nn.Linear(256, 128),
+                    nn.ReLU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(128, 64),
+                    nn.ReLU(),
+                    nn.Linear(64, action_size),
+                    nn.Sigmoid()
+                )
+                
+            def forward(self, x):
+                # Feature extraction
+                features = self.feature_extractor(x)
+                
+                # Attention (simplified for demonstration)
+                attended_features = features
+                
+                # Decision making
+                actions = self.decision_layers(attended_features)
+                return actions
+        
+        return AttentionDQN(self.state_size, self.action_size)
+    
+    def update_target_network(self):
+        """Update target network"""
+        self.target_network.load_state_dict(self.q_network.state_dict())
+    
+    def remember(self, state, action, reward, next_state, done, priority=1.0):
+        """Store experience with priority"""
+        experience = (state, action, reward, next_state, done)
+        self.memory.append(experience)
+        
+        # Store high-priority experiences
+        if abs(reward) > 10 or priority > 1.0:
+            self.priority_memory.append(experience)
+    
+    def act(self, state, predicted_demand=None, weather_condition=None):
+        """Enhanced action selection with domain knowledge"""
+        if np.random.random() <= self.epsilon:
+            return np.random.random(self.action_size)
+        
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        q_values = self.q_network(state_tensor)
+        action = q_values.cpu().data.numpy()[0]
+        
+        # Apply domain knowledge adjustments
+        if predicted_demand and weather_condition:
+            action = self._apply_domain_knowledge(action, predicted_demand, weather_condition)
+        
+        return action
+    
+    def _apply_domain_knowledge(self, action: np.ndarray, predicted_demand: Dict, weather: str) -> np.ndarray:
+        """Apply domain knowledge to adjust actions"""
+        adjusted_action = action.copy()
+        
+        # Weather-based adjustments
+        if weather == 'hot':
+            # Increase cold beverage ingredients
+            for i, ingredient in enumerate(['milk', 'ice_cream', 'coffee_powder']):
+                if ingredient in predicted_demand:
+                    adjusted_action[i] = min(adjusted_action[i] * 1.2, 1.0)
+        
+        elif weather == 'rainy':
+            # Increase hot beverage ingredients
+            for i, ingredient in enumerate(['tea_leaves', 'ginger', 'milk']):
+                if ingredient in predicted_demand:
+                    adjusted_action[i] = min(adjusted_action[i] * 1.3, 1.0)
+        
+        # Demand-based adjustments
+        if predicted_demand:
+            high_demand_dishes = [dish for dish, demand in predicted_demand.items() if demand > 50]
+            
+            # Increase ingredients for high-demand dishes
+            # This is simplified - in practice, you'd map dishes to ingredient indices
+            
+        return adjusted_action
+    
+    def replay(self, batch_size=32):
+        """Enhanced training with prioritized experience replay"""
+        if len(self.memory) < batch_size:
+            return
+        
+        # Mix regular and priority experiences
+        regular_batch_size = batch_size // 2
+        priority_batch_size = batch_size - regular_batch_size
+        
+        regular_batch = random.sample(self.memory, regular_batch_size)
+        
+        priority_batch = []
+        if self.priority_memory and len(self.priority_memory) >= priority_batch_size:
+            priority_batch = random.sample(self.priority_memory, priority_batch_size)
+        else:
+            priority_batch = random.sample(self.memory, priority_batch_size)
+        
+        batch = regular_batch + priority_batch
+        
+        states = torch.FloatTensor([e[0] for e in batch]).to(self.device)
+        actions = torch.FloatTensor([e[1] for e in batch]).to(self.device)
+        rewards = torch.FloatTensor([e[2] for e in batch]).to(self.device)
+        next_states = torch.FloatTensor([e[3] for e in batch]).to(self.device)
+        dones = torch.BoolTensor([e[4] for e in batch]).to(self.device)
+        
+        current_q_values = self.q_network(states)
+        next_q_values = self.target_network(next_states).detach()
+        target_q_values = rewards + (0.95 * next_q_values.max(1)[0] * ~dones)
+        
+        loss = F.mse_loss(current_q_values.max(1)[0], target_q_values)
+        
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+        self.optimizer.step()
+        
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+# 7. MAIN ENHANCED SYSTEM
+class UltimateHotelInventorySystem:
+    def __init__(self, hotel_capacity: int = 100, location: str = "Chennai", 
+                 openai_api_key: str = None, weather_api_key: str = None):
+        
+        # Initialize all components
+        self.recipe_db = EnhancedRecipeDatabase()
+        self.weather_service = WeatherService(weather_api_key)
+        self.event_scraper = EnhancedEventScraper(openai_api_key)
+        self.demand_predictor = SmartDemandPredictor(self.recipe_db, self.weather_service)
+        self.env = WasteAwareInventoryEnvironment(self.recipe_db, hotel_capacity)
+        
+        # Initialize enhanced DRL agent
+        state_size = len(self.env.get_state())
+        action_size = len(self.env.ingredients)
+        self.agent = EnhancedDQNAgent(state_size, action_size)
+        
+        # System parameters
+        self.location = location
+        self.hotel_capacity = hotel_capacity
+        self.training_history = []
+        
+        print(f"🏨 Ultimate Hotel Inventory System Initialized")
+        print(f"📍 Location: {location}")
+        print(f"👥 Capacity: {hotel_capacity}")
+        print(f"🥘 Recipes loaded: {len(self.recipe_db.recipes)}")
+        print(f"🥬 Ingredients tracked: {len(self.recipe_db.ingredients_master)}")
+    
+    def train(self, episodes: int = 1000, save_interval: int = 100):
+        """Comprehensive training with all features"""
+        print(f"\n🚀 Starting training for {episodes} episodes...")
+        
+        for episode in range(episodes):
+            state = self.env.reset()
+            total_reward = 0
+            episode_metrics = []
+            
+            # Simulate a day's operation (24 decision points)
+            for step in range(24):
+                current_time = datetime.now() + timedelta(hours=step)
+                
+                # Get events for today
+                events = self.event_scraper.scrape_events(self.location, 1)
+                
+                # Get weather forecast
+                weather_forecast = self.weather_service.get_weather_forecast(self.location, 1)
+                weather_condition = self.weather_service.classify_weather(weather_forecast[0])
+                
+                # Predict demand
+                predicted_demand = self.demand_predictor.predict_dish_demand(
+                    events, current_time, self.hotel_capacity, self.location
+                )
+                
+                # Generate actual demand (with some randomness for training)
+                actual_demand = self._generate_actual_demand(predicted_demand, weather_condition)
+                
+                # Agent chooses action
+                action = self.agent.act(state, predicted_demand, weather_condition)
+                
+                # Execute action and get feedback
+                next_state, reward, done, info = self.env.step(
+                    action, predicted_demand, actual_demand, weather_condition
+                )
+                
+                # Store experience with priority based on reward magnitude
+                priority = min(abs(reward) / 10.0, 2.0)
+                self.agent.remember(state, action, reward, next_state, done, priority)
+                
+                state = next_state
+                total_reward += reward
+                episode_metrics.append(info)
+                
+                # Train agent
+                if len(self.agent.memory) > 64:
+                    self.agent.replay(64)
+            
+            # Update target network periodically
+            if episode % 50 == 0:
+                self.agent.update_target_network()
+            
+            # Calculate episode summary
+            episode_summary = self._calculate_episode_summary(episode_metrics)
+            episode_summary['total_reward'] = total_reward
+            episode_summary['episode'] = episode
+            
+            self.training_history.append(episode_summary)
+            
+            # Print progress
+            if episode % 100 == 0:
+                recent_performance = self._get_recent_performance()
+                print(f"\n📊 Episode {episode} Summary:")
+                print(f"   💰 Avg Total Cost: ₹{recent_performance['avg_cost']:.2f}")
+                print(f"   🗑️ Avg Waste %: {recent_performance['avg_waste']:.2f}%")
+                print(f"   📈 Avg Service Level: {recent_performance['avg_service']:.2%}")
+                print(f"   🎯 Avg Accuracy: {recent_performance['avg_accuracy']:.2%}")
+                print(f"   🧠 Epsilon: {self.agent.epsilon:.3f}")
+            
+            # Save model periodically
+            if episode > 0 and episode % save_interval == 0:
+                self.save_model(f"model_checkpoint_ep_{episode}.pth")
+        
+        print(f"\n✅ Training completed!")
+        self.save_model("final_model.pth")
+    
+    def _generate_actual_demand(self, predicted_demand: Dict, weather: str) -> Dict:
+        """Generate realistic actual demand with noise and weather effects"""
+        actual_demand = {}
+        
+        for dish, predicted in predicted_demand.items():
+            # Add random variation (±20%)
+            noise_factor = random.uniform(0.8, 1.2)
+            
+            # Weather impact
+            if dish in self.recipe_db.recipes:
+                weather_impact = self.recipe_db.recipes[dish]['weather_preference'].get(weather, 1.0)
+            else:
+                weather_impact = 1.0
+            
+            actual = int(predicted * noise_factor * weather_impact)
+            actual_demand[dish] = max(0, actual)
+        
+        return actual_demand
+    
+    def _calculate_episode_summary(self, metrics_list: List[Dict]) -> Dict:
+        """Calculate summary metrics for an episode"""
+        if not metrics_list:
+            return {}
+        
+        return {
+            'avg_cost': np.mean([m['total_cost'] for m in metrics_list]),
+            'avg_waste_percentage': np.mean([m['waste_percentage'] for m in metrics_list]),
+            'avg_service_level': np.mean([m['service_level'] for m in metrics_list]),
+            'avg_accuracy': np.mean([m['prediction_accuracy'] for m in metrics_list]),
+            'total_dishes_served': sum([m['dishes_served'] for m in metrics_list])
+        }
+    
+    def _get_recent_performance(self, episodes: int = 10) -> Dict:
+        """Get recent performance metrics"""
+        if len(self.training_history) < episodes:
+            recent_history = self.training_history
+        else:
+            recent_history = self.training_history[-episodes:]
+        
+        if not recent_history:
+            return {'avg_cost': 0, 'avg_waste': 0, 'avg_service': 0, 'avg_accuracy': 0}
+        
+        return {
+            'avg_cost': np.mean([h['avg_cost'] for h in recent_history]),
+            'avg_waste': np.mean([h['avg_waste_percentage'] for h in recent_history]) * 100,
+            'avg_service': np.mean([h['avg_service_level'] for h in recent_history]),
+            'avg_accuracy': np.mean([h['avg_accuracy'] for h in recent_history])
+        }
+    
+    def predict_inventory_needs(self, target_date: datetime) -> Dict:
+        """Comprehensive inventory prediction for a specific date"""
+        print(f"\n🔮 Predicting inventory needs for {target_date.strftime('%Y-%m-%d')}")
+        
+        # Get events for target date
+        events = self.event_scraper.scrape_events(self.location, 7)
+        relevant_events = [e for e in events if e['date'].date() == target_date.date()]
+        
+        # Get weather forecast
+        weather_forecast = self.weather_service.get_weather_forecast(self.location, 7)
+        target_weather = next((w for w in weather_forecast if w['date'].date() == target_date.date()), weather_forecast[0])
+        weather_condition = self.weather_service.classify_weather(target_weather)
+        
+        # Predict dish demand
+        predicted_demand = self.demand_predictor.predict_dish_demand(
+            relevant_events, target_date, self.hotel_capacity, self.location
+        )
+        
+        # Get current state and predict inventory action
+        current_state = self.env.get_state()
+        inventory_action = self.agent.act(current_state, predicted_demand, weather_condition)
+        
+        # Convert action to ingredient quantities
+        ingredient_recommendations = {}
+        for i, ingredient in enumerate(self.env.ingredients):
+            max_order = self.env._get_max_order_quantity(ingredient)
+            recommended_quantity = inventory_action[i] * max_order
+            
+            if recommended_quantity > 0.1:  # Only show meaningful quantities
+                ingredient_recommendations[ingredient] = {
+                    'quantity': round(recommended_quantity, 2),
+                    'unit': self.recipe_db.ingredients_master[ingredient]['unit'],
+                    'cost_per_unit': self.recipe_db.ingredients_master[ingredient]['cost_per_unit'],
+                    'total_cost': round(recommended_quantity * self.recipe_db.ingredients_master[ingredient]['cost_per_unit'], 2),
+                    'storage_condition': self.recipe_db.ingredients_master[ingredient]['storage_condition']
+                }
+        
+        # Calculate ingredient requirements for predicted dishes
+        required_ingredients = self.recipe_db.get_ingredients_for_recipes(predicted_demand)
+        
+        # Check inventory status
+        inventory_status = {}
+        for ingredient in self.env.ingredients:
+            current_stock = self.recipe_db.get_available_quantity(ingredient)
+            required = required_ingredients.get(ingredient, 0)
+            expiring_soon = len([item for item in self.recipe_db.current_inventory.get(ingredient, [])
+                               if 0 <= item.days_to_expiry <= 3])
+            
+            inventory_status[ingredient] = {
+                'current_stock': current_stock,
+                'required': required,
+                'shortfall': max(0, required - current_stock),
+                'expiring_soon_batches': expiring_soon
+            }
+        
+        return {
+            'date': target_date.strftime('%Y-%m-%d'),
+            'weather_condition': weather_condition,
+            'relevant_events': len(relevant_events),
+            'event_details': [
+                {
+                    'title': event['title'],
+                    'estimated_crowd': event['estimated_crowd'],
+                    'event_type': event['event_type'],
+                    'custom_tags': event['custom_tags']
+                } for event in relevant_events
+            ],
+            'predicted_dish_demand': predicted_demand,
+            'ingredient_recommendations': ingredient_recommendations,
+            'current_inventory_status': inventory_status,
+            'total_estimated_cost': sum(item['total_cost'] for item in ingredient_recommendations.values()),
+            'confidence_score': 1 - self.agent.epsilon,
+            'expected_waste_percentage': self._get_recent_performance()['avg_waste'],
+            'expected_service_level': self._get_recent_performance()['avg_service']
+        }
+    
+    def get_dashboard_data(self) -> Dict:
+        """Get comprehensive dashboard data"""
+        performance = self.env.get_performance_summary()
+        recent_perf = self._get_recent_performance()
+        
+        # Get expiring inventory
+        expiring_soon = self.recipe_db.get_expiring_soon(3)
+        
+        return {
+            'current_performance': {
+                'waste_percentage': recent_perf['avg_waste'],
+                'service_level': recent_perf['avg_service'],
+                'daily_cost': recent_perf['avg_cost'],
+                'prediction_accuracy': recent_perf['avg_accuracy']
+            },
+            'inventory_alerts': {
+                'expiring_soon': [
+                    {
+                        'ingredient': item.ingredient,
+                        'quantity': item.quantity,
+                        'days_to_expiry': item.days_to_expiry,
+                        'value': item.total_value
+                    } for item in expiring_soon
+                ],
+                'low_stock': self._get_low_stock_items(),
+                'total_inventory_value': self._calculate_total_inventory_value()
+            },
+            'recent_trends': {
+                'cost_trend': [h['avg_cost'] for h in self.training_history[-30:]] if len(self.training_history) >= 30 else [],
+                'waste_trend': [h['avg_waste_percentage'] for h in self.training_history[-30:]] if len(self.training_history) >= 30 else [],
+                'accuracy_trend': [h['avg_accuracy'] for h in self.training_history[-30:]] if len(self.training_history) >= 30 else []
+            },
+            'model_status': {
+                'training_episodes': len(self.training_history),
+                'epsilon': self.agent.epsilon,
+                'model_confidence': 1 - self.agent.epsilon
+            }
+        }
+    
+    def _get_low_stock_items(self) -> List[Dict]:
+        """Get items with low stock levels"""
+        low_stock = []
+        
+        for ingredient in self.env.ingredients:
+            current_stock = self.recipe_db.get_available_quantity(ingredient)
+            # Define minimum stock levels based on ingredient category
+            category = self.recipe_db.ingredients_master[ingredient]['category']
+            min_levels = {
+                'grains': 5, 'dairy': 3, 'vegetables': 2, 'meat': 1, 
+                'spices': 0.5, 'beverages': 1, 'others': 2
+            }
+            min_stock = min_levels.get(category, 2)
+            
+            if current_stock < min_stock:
+                low_stock.append({
+                    'ingredient': ingredient,
+                    'current_stock': current_stock,
+                    'minimum_required': min_stock,
+                    'shortage': min_stock - current_stock,
+                    'unit': self.recipe_db.ingredients_master[ingredient]['unit']
+                })
+        
+        return low_stock
+    
+    def _calculate_total_inventory_value(self) -> float:
+        """Calculate total value of current inventory"""
+        total_value = 0
+        
+        for ingredient in self.env.ingredients:
+            quantity = self.recipe_db.get_available_quantity(ingredient)
+            cost_per_unit = self.recipe_db.ingredients_master[ingredient]['cost_per_unit']
+            total_value += quantity * cost_per_unit
+        
+        return total_value
+    
+    def save_model(self, filepath: str):
+        """Save the trained model and system state"""
+        model_data = {
+            'model_state_dict': self.agent.q_network.state_dict(),
+            'target_model_state_dict': self.agent.target_network.state_dict(),
+            'optimizer_state_dict': self.agent.optimizer.state_dict(),
+            'epsilon': self.agent.epsilon,
+            'training_history': self.training_history,
+            'recipe_database': self.recipe_db.recipes,
+            'ingredients_master': self.recipe_db.ingredients_master,
+            'system_config': {
+                'hotel_capacity': self.hotel_capacity,
+                'location': self.location,
+                'state_size': self.agent.state_size,
+                'action_size': self.agent.action_size
+            }
+        }
+        
+        torch.save(model_data, filepath)
+        print(f"💾 Model and system state saved to {filepath}")
+    
+    def load_model(self, filepath: str):
+        """Load a trained model and system state"""
+        try:
+            checkpoint = torch.load(filepath, map_location=self.agent.device)
+            
+            self.agent.q_network.load_state_dict(checkpoint['model_state_dict'])
+            self.agent.target_network.load_state_dict(checkpoint['target_model_state_dict'])
+            self.agent.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.agent.epsilon = checkpoint['epsilon']
+            self.training_history = checkpoint['training_history']
+            
+            print(f"📂 Model loaded from {filepath}")
+            print(f"🎯 Model confidence: {1 - self.agent.epsilon:.2%}")
+            print(f"📈 Training episodes: {len(self.training_history)}")
+            
+        except Exception as e:
+            print(f"❌ Error loading model: {e}")
+    
+    def generate_report(self, days: int = 7) -> str:
+        """Generate comprehensive performance report"""
+        dashboard_data = self.get_dashboard_data()
+        
+        report = f"""
+🏨 HOTEL INVENTORY SYSTEM - PERFORMANCE REPORT
+{'='*60}
+📍 Location: {self.location}
+👥 Capacity: {self.hotel_capacity}
+📅 Report Period: Last {days} days
+⏰ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+📊 CURRENT PERFORMANCE METRICS
+{'─'*40}
+💰 Average Daily Cost: ₹{dashboard_data['current_performance']['daily_cost']:.2f}
+🗑️ Waste Percentage: {dashboard_data['current_performance']['waste_percentage']:.2f}%
+📈 Service Level: {dashboard_data['current_performance']['service_level']:.2%}
+🎯 Prediction Accuracy: {dashboard_data['current_performance']['prediction_accuracy']:.2%}
+
+🚨 INVENTORY ALERTS
+{'─'*40}
+⚠️ Items Expiring Soon (3 days): {len(dashboard_data['inventory_alerts']['expiring_soon'])}
+📉 Low Stock Items: {len(dashboard_data['inventory_alerts']['low_stock'])}
+💼 Total Inventory Value: ₹{dashboard_data['inventory_alerts']['total_inventory_value']:.2f}
+
+🤖 MODEL STATUS
+{'─'*40}
+🧠 Training Episodes: {dashboard_data['model_status']['training_episodes']:,}
+🎲 Exploration Rate: {dashboard_data['model_status']['epsilon']:.3f}
+✅ Model Confidence: {dashboard_data['model_status']['model_confidence']:.2%}
+
+💡 RECOMMENDATIONS
+{'─'*40}
+"""
+        
+        # Add specific recommendations based on performance
+        if dashboard_data['current_performance']['waste_percentage'] > 10:
+            report += "🔴 HIGH WASTE DETECTED: Consider reducing order quantities\n"
+        
+        if dashboard_data['current_performance']['service_level'] < 0.9:
+            report += "🔴 LOW SERVICE LEVEL: Increase safety stock for critical items\n"
+        
+        if len(dashboard_data['inventory_alerts']['expiring_soon']) > 5:
+            report += "🟡 EXPIRY ALERT: Plan immediate consumption for expiring items\n"
+        
+        if dashboard_data['current_performance']['prediction_accuracy'] > 0.85:
+            report += "🟢 EXCELLENT ACCURACY: Model performing well\n"
+        
+        report += "\n📋 DETAILED INVENTORY STATUS\n"
+        report += "─" * 40 + "\n"
+        
+        # Add expiring items details
+        if dashboard_data['inventory_alerts']['expiring_soon']:
+            report += "⚠️ EXPIRING SOON:\n"
+            for item in dashboard_data['inventory_alerts']['expiring_soon'][:5]:  # Top 5
+                report += f"   • {item['ingredient']}: {item['quantity']} units (expires in {item['days_to_expiry']} days)\n"
+        
+        # Add low stock details
+        if dashboard_data['inventory_alerts']['low_stock']:
+            report += "\n📉 LOW STOCK:\n"
+            for item in dashboard_data['inventory_alerts']['low_stock'][:5]:  # Top 5
+                report += f"   • {item['ingredient']}: {item['current_stock']} {item['unit']} (need {item['shortage']} more)\n"
+        
+        return report
+    
+    def optimize_for_event(self, event_title: str, event_date: datetime, expected_attendees: int) -> Dict:
+        """Optimize inventory specifically for a known event"""
+        print(f"\n🎯 Optimizing inventory for event: {event_title}")
+        
+        # Create custom event data
+        custom_event = {
+            'title': event_title,
+            'date': event_date,
+            'expected_attendees': expected_attendees,
+            'description': f"Custom event optimization for {event_title}",
+            'estimated_crowd': expected_attendees,
+            'venue': 'Hotel premises'
+        }
+        
+        # Enhance event data
+        enhanced_event = self.event_scraper.enhance_event_data(custom_event)
+        custom_event.update(enhanced_event)
+        
+        # Get weather for event date
+        weather_forecast = self.weather_service.get_weather_forecast(self.location, 7)
+        event_weather = next((w for w in weather_forecast if w['date'].date() == event_date.date()), weather_forecast[0])
+        weather_condition = self.weather_service.classify_weather(event_weather)
+        
+        # Predict demand for this specific event
+        predicted_demand = self.demand_predictor.predict_dish_demand(
+            [custom_event], event_date, self.hotel_capacity, self.location
+        )
+        
+        # Calculate required ingredients
+        required_ingredients = self.recipe_db.get_ingredients_for_recipes(predicted_demand)
+        
+        # Get optimal inventory recommendations
+        current_state = self.env.get_state()
+        optimal_action = self.agent.act(current_state, predicted_demand, weather_condition)
+        
+        # Convert to specific recommendations
+        recommendations = {}
+        total_cost = 0
+        
+        for i, ingredient in enumerate(self.env.ingredients):
+            if ingredient in required_ingredients:
+                max_order = self.env._get_max_order_quantity(ingredient)
+                recommended_quantity = optimal_action[i] * max_order
+                current_stock = self.recipe_db.get_available_quantity(ingredient)
+                needed = max(0, required_ingredients[ingredient] - current_stock)
+                
+                if needed > 0:
+                    final_recommendation = max(recommended_quantity, needed)
+                    cost = final_recommendation * self.recipe_db.ingredients_master[ingredient]['cost_per_unit']
+                    total_cost += cost
+                    
+                    recommendations[ingredient] = {
+                        'quantity_needed': round(needed, 2),
+                        'current_stock': round(current_stock, 2),
+                        'recommended_purchase': round(final_recommendation, 2),
+                        'unit': self.recipe_db.ingredients_master[ingredient]['unit'],
+                        'cost_per_unit': self.recipe_db.ingredients_master[ingredient]['cost_per_unit'],
+                        'total_cost': round(cost, 2),
+                        'safety_margin': round(final_recommendation - needed, 2)
+                    }
+        
+        return {
+            'event_details': {
+                'title': event_title,
+                'date': event_date.strftime('%Y-%m-%d'),
+                'attendees': expected_attendees,
+                'event_type': custom_event.get('event_type', 'general'),
+                'custom_tags': custom_event.get('custom_tags', []),
+                'weather_condition': weather_condition
+            },
+            'predicted_dish_demand': predicted_demand,
+            'ingredient_recommendations': recommendations,
+            'total_estimated_cost': round(total_cost, 2),
+            'confidence_score': 1 - self.agent.epsilon,
+            'preparation_timeline': self._generate_preparation_timeline(recommendations, event_date)
+        }
+    
+    def _generate_preparation_timeline(self, recommendations: Dict, event_date: datetime) -> List[Dict]:
+        """Generate preparation timeline for event"""
+        timeline = []
+        
+        # Sort ingredients by shelf life for optimal purchasing schedule
+        ingredient_shelf_life = []
+        for ingredient, rec in recommendations.items():
+            shelf_life = self.recipe_db.ingredients_master[ingredient]['shelf_life_days']
+            ingredient_shelf_life.append((ingredient, shelf_life, rec))
+        
+        # Sort by shelf life (shortest first for later purchase)
+        ingredient_shelf_life.sort(key=lambda x: x[1])
+        
+        for i, (ingredient, shelf_life, rec) in enumerate(ingredient_shelf_life):
+            # Calculate optimal purchase date
+            if shelf_life <= 3:  # Highly perishable
+                purchase_date = event_date - timedelta(days=1)
+                priority = "HIGH"
+            elif shelf_life <= 7:  # Moderately perishable
+                purchase_date = event_date - timedelta(days=2)
+                priority = "MEDIUM"
+            else:  # Stable ingredients
+                purchase_date = event_date - timedelta(days=3)
+                priority = "LOW"
+            
+            timeline.append({
+                'purchase_date': purchase_date.strftime('%Y-%m-%d'),
+                'ingredient': ingredient,
+                'quantity': rec['recommended_purchase'],
+                'unit': rec['unit'],
+                'priority': priority,
+                'storage_condition': self.recipe_db.ingredients_master[ingredient]['storage_condition'],
+                'estimated_cost': rec['total_cost']
+            })
+        
+        # Sort timeline by purchase date
+        timeline.sort(key=lambda x: x['purchase_date'])
+        
+        return timeline
+
+# 8. USAGE EXAMPLE AND DEMO
+def run_demo():
+    """Comprehensive demo of the system"""
+    print("🚀 Starting Ultimate Hotel Inventory System Demo")
+    print("=" * 60)
+    
+    # Initialize system
+    hotel_system = UltimateHotelInventorySystem(
+        hotel_capacity=200,
+        location="Chennai",
+        openai_api_key=None,  # Add your API key here
+        weather_api_key=None   # Add your weather API key here
+    )
+    
+    # Add some initial inventory for realistic demo
+    print("\n📦 Adding initial inventory...")
+    ingredients_to_add = [
+        ('rice', 20, 'Local Supplier'),
+        ('chicken', 15, 'Fresh Meat Co'),
+        ('paneer', 10, 'Dairy Fresh'),
+        ('onions', 25, 'Veggie Market'),
+        ('milk', 30, 'Daily Dairy'),
+        ('tea_leaves', 5, 'Tea Estate')
+    ]
+    
+    for ingredient, quantity, supplier in ingredients_to_add:
+        if ingredient in hotel_system.recipe_db.ingredients_master:
+            hotel_system.recipe_db.add_inventory(ingredient, quantity, supplier)
+            print(f"   ✅ Added {quantity} units of {ingredient}")
+    
+    # Train the model (reduced episodes for demo)
+    print("\n🧠 Training the AI model...")
+    hotel_system.train(episodes=200, save_interval=50)
+    
+    # Generate predictions for tomorrow
+    tomorrow = datetime.now() + timedelta(days=1)
+    prediction = hotel_system.predict_inventory_needs(tomorrow)
+    
+    print("\n" + "=" * 60)
+    print("📋 TOMORROW'S INVENTORY PREDICTIONS")
+    print("=" * 60)
+    print(f"📅 Date: {prediction['date']}")
+    print(f"🌤️ Weather: {prediction['weather_condition']}")
+    print(f"🎉 Events: {prediction['relevant_events']} relevant events")
+    
+    if prediction['event_details']:
+        print("\n🎪 EVENT DETAILS:")
+        for event in prediction['event_details']:
+            print(f"   • {event['title']} ({event['estimated_crowd']} people)")
+            print(f"     Type: {event['event_type']}, Tags: {', '.join(event['custom_tags'])}")
+    
+    print(f"\n🍽️ PREDICTED DISH DEMAND:")
+    for dish, quantity in prediction['predicted_dish_demand'].items():
+        if quantity > 0:
+            print(f"   • {dish}: {quantity} servings")
+    
+    print(f"\n🛒 INGREDIENT RECOMMENDATIONS:")
+    total_cost = 0
+    for ingredient, details in prediction['ingredient_recommendations'].items():
+        print(f"   • {ingredient}: {details['quantity']} {details['unit']} (₹{details['total_cost']:.2f})")
+        total_cost += details['total_cost']
+    
+    print(f"\n💰 Total Estimated Cost: ₹{total_cost:.2f}")
+    print(f"🎯 Confidence Score: {prediction['confidence_score']:.2%}")
+    
+    # Generate dashboard report
+    print("\n" + "=" * 60)
+    print("📊 SYSTEM PERFORMANCE REPORT")
+    print("=" * 60)
+    report = hotel_system.generate_report()
+    print(report)
+    
+    # Demo event optimization
+    print("\n" + "=" * 60)
+    print("🎯 EVENT-SPECIFIC OPTIMIZATION DEMO")
+    print("=" * 60)
+    
+    event_date = datetime.now() + timedelta(days=5)
+    event_optimization = hotel_system.optimize_for_event(
+        "Corporate Annual Meeting", 
+        event_date, 
+        300
+    )
+    
+    print(f"Event: {event_optimization['event_details']['title']}")
+    print(f"Date: {event_optimization['event_details']['date']}")
+    print(f"Attendees: {event_optimization['event_details']['attendees']}")
+    print(f"Event Type: {event_optimization['event_details']['event_type']}")
+    
+    print(f"\n📋 PREPARATION TIMELINE:")
+    for item in event_optimization['preparation_timeline'][:5]:  # Show first 5
+        print(f"   {item['purchase_date']}: Buy {item['quantity']} {item['unit']} of {item['ingredient']} (Priority: {item['priority']})")
+    
+    print(f"\n💰 Total Event Cost: ₹{event_optimization['total_estimated_cost']:.2f}")
+    
+    print("\n🎉 Demo completed successfully!")
+    print("💡 The system is now ready for production use!")
+
+# MAIN EXECUTION
+if __name__ == "__main__":
+    # Uncomment to run the demo
+    # run_demo()
+    
+    # For production use:
+    system = UltimateHotelInventorySystem(
+        hotel_capacity=150,
+        location="Mumbai",
+        # openai_api_key="your_openai_key_here",
+        # weather_api_key="your_weather_key_here"
+    )
+    
+    print("🏨 Hotel Inventory System Initialized!")
+    print("📚 Available methods:")
+    print("   • system.train(episodes=1000) - Train the AI model")
+    print("   • system.predict_inventory_needs(date) - Get predictions")
+    print("   • system.optimize_for_event(title, date, attendees) - Event optimization")
+    print("   • system.get_dashboard_data() - Get performance metrics")
+    print("   • system.generate_report() - Generate detailed report")
+    print("   • system.save_model(filepath) - Save trained model")
+    print("   • system.load_model(filepath) - Load pre-trained model")
